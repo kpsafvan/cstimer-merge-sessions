@@ -191,54 +191,88 @@ def merge_event_data(dest_event, src_event):
 
 
 def merge_session_data(data1, data2):
-    merged = copy.deepcopy(data1 or {})
-    data2 = data2 or {}
+    from collections import defaultdict
 
-    for key, src_entry in data2.items():
-        if key in merged and isinstance(merged[key], dict) and isinstance(src_entry, dict):
-            dest_entry = merged[key]
-            # merge stat count
-            stat1 = dest_entry.get("stat")
-            stat2 = src_entry.get("stat")
-            if isinstance(stat1, list) and stat1 and isinstance(stat2, list) and stat2:
-                try:
-                    c1 = float(stat1[0])
-                    c2 = float(stat2[0])
-                    sumc = c1 + c2
-                    dest_entry["stat"][0] = int(sumc) if sumc.is_integer() else sumc
-                except (ValueError, TypeError):
-                    pass
-            # merge range dates
-            d1 = dest_entry.get("date")
-            d2 = src_entry.get("date")
-            if isinstance(d1, list) and len(d1) >= 2 and isinstance(d2, list) and len(d2) >= 2:
-                dates = [x for x in [d1[0], d2[0]] if isinstance(x, (int, float))]
-                dates2 = [x for x in [d1[1], d2[1]] if isinstance(x, (int, float))]
-                if dates and dates2:
-                    dest_entry["date"] = [min(dates), max(dates2)]
-            # fill missing fields with src values
-            for sub_key, sub_val in src_entry.items():
-                if sub_key not in dest_entry:
-                    dest_entry[sub_key] = copy.deepcopy(sub_val)
-            merged[key] = dest_entry
-        else:
-            merged[key] = copy.deepcopy(src_entry)
+    all_events = []
+    if data1:
+        for key, event in data1.items():
+            if isinstance(event, dict):
+                scr_type = event.get("opt", {}).get("scrType") or str(event.get("name", key))
+                all_events.append((scr_type, key, event, 1))  # 1 for source 1
+    if data2:
+        for key, event in data2.items():
+            if isinstance(event, dict):
+                scr_type = event.get("opt", {}).get("scrType") or str(event.get("name", key))
+                all_events.append((scr_type, key, event, 2))  # 2 for source 2
 
-    return merged
+    grouped = defaultdict(list)
+    for scr_type, key, event, source in all_events:
+        grouped[scr_type].append((key, event, source))
+
+    merged = {}
+    key_mapping = {}  # scr_type -> list of (source, orig_key)
+    scr_type_order = []  # list of scr_type in order of new keys
+    new_key = 1
+    for scr_type, group in grouped.items():
+        if not group:
+            continue
+        merged_event = {}
+        original_keys = []
+        for orig_key, event, source in group:
+            original_keys.append((source, orig_key))
+            # merge stats
+            stat = event.get("stat")
+            if isinstance(stat, list) and stat:
+                if "stat" not in merged_event:
+                    merged_event["stat"] = stat[:]
+                else:
+                    try:
+                        merged_event["stat"][0] = float(merged_event["stat"][0]) + float(stat[0])
+                    except (ValueError, TypeError, IndexError):
+                        pass
+            # merge dates
+            date_range = event.get("date")
+            if isinstance(date_range, list) and len(date_range) >= 2:
+                if "date" not in merged_event:
+                    merged_event["date"] = date_range[:]
+                else:
+                    dates = [d for d in [merged_event["date"][0], merged_event["date"][1], date_range[0], date_range[1]] if d is not None and isinstance(d, (int, float))]
+                    if dates:
+                        merged_event["date"] = [min(dates), max(dates)]
+            # take other fields from first
+            for k, v in event.items():
+                if k not in merged_event:
+                    merged_event[k] = copy.deepcopy(v)
+        merged[str(new_key)] = merged_event
+        key_mapping[scr_type] = original_keys
+        scr_type_order.append(scr_type)
+        new_key += 1
+
+    return merged, key_mapping, scr_type_order
 
 
-def merge_root_sessions(root1, root2):
+def merge_root_sessions(root1, root2, key_mapping, scr_type_order):
     root1 = root1 or {}
     root2 = root2 or {}
     merged = copy.deepcopy(root1)
 
-    all_session_keys = set(extract_root_session_arrays(root1).keys()) | set(extract_root_session_arrays(root2).keys())
-    for key in all_session_keys:
-        arr1 = root1.get(key, []) if isinstance(root1.get(key), list) else []
-        arr2 = root2.get(key, []) if isinstance(root2.get(key), list) else []
-        merged[key] = merge_session_arrays(arr1, arr2)
+    session_arrays = {}
+    for idx, scr_type in enumerate(scr_type_order, start=1):
+        orig_keys = key_mapping.get(scr_type, [])
+        combined = []
+        for source, orig_key in orig_keys:
+            session_key = f"session{orig_key}"
+            arr = (root1 if source == 1 else root2).get(session_key, [])
+            if isinstance(arr, list):
+                combined.extend(arr)
+        if combined:
+            combined = merge_session_arrays([], combined)  # sort the combined
+            session_arrays[f"session{idx}"] = combined
 
-    # keep any extra non-session keys from root2 (preserve properties handled elsewhere)
+    # add merged session arrays
+    merged.update(session_arrays)
+
+    # keep other keys from root2
     for key, val in root2.items():
         if key not in merged and key != "properties":
             merged[key] = copy.deepcopy(val)
@@ -266,9 +300,9 @@ def main() -> None:
         print("Error: neither input JSON contains properties.sessionData", file=sys.stderr)
         sys.exit(1)
 
-    merged_root = merge_root_sessions(obj1, obj2)
+    merged_session_data, key_mapping, scr_type_order = merge_session_data(session1 or {}, session2 or {})
 
-    merged_session_data = merge_session_data(session1 or {}, session2 or {})
+    merged_root = merge_root_sessions(obj1, obj2, key_mapping, scr_type_order)
 
     merged_root.setdefault("properties", {})
     # keep same type as input (string if originally string)
