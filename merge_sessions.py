@@ -197,12 +197,16 @@ def merge_session_data(data1, data2):
     if data1:
         for key, event in data1.items():
             if isinstance(event, dict):
-                scr_type = event.get("opt", {}).get("scrType") or str(event.get("name", key))
+                scr_type = event.get("opt", {}).get("scrType")
+                if not scr_type:
+                    scr_type = "default"
                 all_events.append((scr_type, key, event, 1))  # 1 for source 1
     if data2:
         for key, event in data2.items():
             if isinstance(event, dict):
-                scr_type = event.get("opt", {}).get("scrType") or str(event.get("name", key))
+                scr_type = event.get("opt", {}).get("scrType")
+                if not scr_type:
+                    scr_type = "default"
                 all_events.append((scr_type, key, event, 2))  # 2 for source 2
 
     grouped = defaultdict(list)
